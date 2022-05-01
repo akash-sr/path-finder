@@ -14,6 +14,7 @@
 #include <netinet/icmp6.h>
 #include <netinet/udp.h>
 #include <arpa/inet.h>
+#include <sys/msg.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <errno.h>
@@ -23,10 +24,12 @@
 #include <pthread.h>
 
 #define MAX_TTL 30
-#define MAX_DOMAINS 5
+#define MAX_DOMAINS 1000
 #define BUF_SIZE 1500
+#define IP_SIZE 100
 #define NPROBES 3
 #define WAITTIME 2
+#define MS_ID 'b'
 
 extern int errno;
 extern int gotalarm;
@@ -93,13 +96,26 @@ typedef struct args{
   int sendfd;
   int recvfd;
   int urlInd;
+  // int msqid;
   // int probeNo;
   // struct timeval tv;
 }args;
 
+#define MSGQ_PATH "."
+
+typedef struct MSG{
+  long mtype; // urlInd
+  int ttl;
+  int probe;
+  double rtt;
+  char ip[IP_SIZE];
+  int code;
+}Message;
+
 struct result{
   char ip[NI_MAXHOST];
   double rtt;
+  int code;
 }result[MAX_DOMAINS][MAX_TTL][NPROBES];
 
 int datalen = sizeof(rec); //bytes of data following ICMP header
@@ -118,9 +134,88 @@ u_short dport = 32768+666;
 pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t compl_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t ttl_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mq_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void find_longest_common_path(){
 
+int compute_hash(char* s) {
+    const int p = 31;
+    const int m = 1e9 + 9;
+    long long hash_value = 0;
+    long long p_pow = 1;
+    for (int i=0;i<strlen(s);i++) {
+        char c = s[i];
+        hash_value = (hash_value + (c - 'a' + 1) * p_pow) % m;
+        p_pow = (p_pow * p) % m;
+    }
+    return hash_value;
+}
+
+void find_longest_common_path(int urlCnt){
+  char paths[urlCnt][MAX_TTL][50];
+  int plen[urlCnt];
+  int len = 0;
+  for(int i=0;i<urlCnt;i++){
+    int ind = 0;
+    char* lastip=NULL;
+    for(int ttl=1;ttl<=MAX_TTL;ttl++){
+      for(int probe=1;probe<=NPROBES;probe++){
+        if(result[i][ttl-1][probe-1].code >=0)
+          continue;
+        // if(result[i][ttl-1][probe-1].ip==NULL){
+        //   printf("null\n");
+        // }
+        // printf("%s\n",result[i][ttl-1][probe-1].ip);
+        if(strcmp(result[i][ttl-1][probe-1].ip, "*") && (lastip==NULL || strcmp(result[i][ttl-1][probe-1].ip, lastip))){
+          strcpy(paths[i][ind], result[i][ttl-1][probe-1].ip);
+          lastip = paths[i][ind];
+          ind++;
+        }
+
+      }
+    }
+    if(ind<MAX_TTL){
+      strcpy(paths[i][ind],"!");
+    }
+    plen[i] = ind;
+    len = len>ind?len:ind;
+
+  }
+
+  int taken[len];
+  int indexes[urlCnt];
+  memset(&taken, 1, sizeof(taken));
+  memset(&indexes, 0, sizeof(indexes));
+  for(int ind=0;ind<plen[0];ind++){
+      // char* ip = paths[i][ind];
+    int flag = 1;
+    for(int i=1;i<urlCnt;i++){
+      int it = indexes[i];
+      for(;it<plen[i];it++){
+        if(!strcmp(paths[0][ind], paths[i][it])){
+          indexes[i] = it+1;
+          break;
+        }
+      }
+      if(it==plen[i]){
+        flag = 0;
+      }
+    }
+    if(!flag)
+      taken[ind] = 0;
+  }
+
+  printf("Longest Common Path is ");
+  int flag = 1;
+  for(int i=0;i<plen[0];i++){
+    if(taken[i]){
+      flag = 0;
+      printf("->[%s]", paths[0][i]);
+    }
+  }
+  if(flag){
+    printf("(null)");
+  }
+  printf("\n");
 }
 
 const char * icmpcode_v4(int code)
@@ -326,7 +421,7 @@ int fill_urls(char* filePath){
   }
   fclose(fp);
 
-  printf("url array populated\n");
+  // printf("url array populated\n");
   return urlCnt-1;
 }
 
@@ -432,10 +527,32 @@ void* func(void* argv){
   // printf("ttl [%d] ", ttl);
   // fflush(stdout);
   int code = 0;
+  int msqid;
+  key_t key;
+
+  if((key = ftok(MSGQ_PATH, MS_ID))<0){
+    perror("ftok");
+    exit(1);
+  }
+  if((msqid = msgget(key, IPC_CREAT | 0664))<0){
+    perror("msgget");
+    exit(1);
+  }
 
   for(int probe = 0; probe<NPROBES;probe++){
     // printf("%s probe [%d] ",url, probe);
     // fflush(stdout);
+    Message msg;
+    // bzero(&msg, sizeof(msg));
+    msg.mtype = func_args->urlInd+1;
+    msg.ttl = ttl;
+    msg.probe = probe;
+    // strcpy(msg.ip, "*");
+    msg.rtt = 0.0;
+    msg.code = -5;
+    // msg.code = -4;
+    // msg.rtt = 0.0;
+    strcpy(msg.ip, "---");
     recvdata = (struct rec*) sendbuf;
     pthread_mutex_lock(&seq_lock);
     recvdata->rec_seq = seq;
@@ -451,26 +568,32 @@ void* func(void* argv){
     }
     if((code = (*pr->recv)(func_args->recvfd, sport, pr, seq, &tvrecv))==-3){
       // printf(" *"); // timeout
-      strcpy(result[func_args->urlInd][ttl-1][probe].ip, "*");
+      // strcpy(result[func_args->urlInd][ttl-1][probe].ip, "*");
+      strcpy(msg.ip, "*");
+      msg.code = -3;
     }
     else{
       char str[NI_MAXHOST];
-      if(sock_cmp_addr(pr->sarecv, pr->salast, pr->salen)!=0){
+      // if(sock_cmp_addr(pr->sarecv, pr->salast, pr->salen)!=0){
         // if(getnameinfo(pr->sarecv, pr->salen, str, sizeof(str), NULL,0, 0)==0){
         //   printf(" %s (%s)", str, sock_ntop_host(pr->sarecv, pr->salen));
         // }
         // else
           // printf(" %s", sock_ntop_host(pr->sarecv, pr->salen));
-        strcpy(result[func_args->urlInd][ttl-1][probe].ip,sock_ntop_host(pr->sarecv, pr->salen));
+        // strcpy(result[func_args->urlInd][ttl-1][probe].ip,sock_ntop_host(pr->sarecv, pr->salen));
+        const char* ipaddr = sock_ntop_host(pr->sarecv, pr->salen);
+        strcpy(msg.ip, ipaddr);
         memcpy(pr->salast, pr->sarecv, pr->salen);
-      }
+      // }
       // tv_sub(&tvrecv, &recvdata->recv_tv);
       tvrecv.tv_sec-=recvdata->recv_tv.tv_sec;
       tvrecv.tv_usec-=recvdata->recv_tv.tv_usec;
       rtt = tvrecv.tv_sec*1000.0 + tvrecv.tv_usec/1000.0;
 
       // printf(" %.3f ms", rtt);
-      result[func_args->urlInd][ttl-1][probe].rtt = rtt;
+      // result[func_args->urlInd][ttl-1][probe].rtt = rtt;
+      msg.rtt = rtt;
+      msg.code = code;
       if(code == -1){
         pthread_mutex_lock(&compl_lock);
         // printf("%s ho gya\n", url);
@@ -478,13 +601,26 @@ void* func(void* argv){
         pthread_mutex_unlock(&compl_lock);
       }
       else if(code >=0){
-        // printf(" (ICMP %s)", (*pr->icmpcode)(code));
+        // printf(" (ICMP %s)\n", (*pr->icmpcode)(code));
+        // printf("(ICM)")
+        // probe--;
+        // continue;
       }
 
     }
+    pthread_mutex_lock(&mq_lock);
+    // printf("%d %d %d\n", getpid(), msg.code, msqid);
+    if(msgsnd(msqid, &msg, sizeof(msg),0)<0){
+      // if(errno==EAGAIN)
+      //   printf("queue full\n");
+      // printf("%d %d %d\n", getpid(), msg.code, msqid);
+      // perror("msgsnd");
+      // printf("%ld %d %d %lf %s %d\n", msg.mtype, msg.ttl, msg.probe, msg.rtt, msg.ip, msg.code);
+    }
+    pthread_mutex_unlock(&mq_lock);
     // printf("\n");
   }
-  printf("\n");
+  // printf("\n");
   pthread_mutex_unlock(func_args->life_mtx);
   return (NULL);
 }
@@ -497,6 +633,23 @@ void sig_chld(int signo){
   return;
 }
 
+
+void print_results(int urlCnt){
+  for(int i=0;i<urlCnt;i++){
+    printf("%s results...\n", urls[i]);
+    for(int ttl=1;ttl<=MAX_TTL;ttl++){
+      printf("[%d]\t",ttl);
+      for(int probe=1;probe<=NPROBES;probe++){
+        if(result[i][ttl-1][probe-1].code >=0)
+          continue;
+        printf("%-20s %-10lf", result[i][ttl-1][probe-1].ip?result[i][ttl-1][probe-1].ip:"(null)", result[i][ttl-1][probe-1].rtt);
+        printf("\t");
+      }
+      printf("\n");
+    }
+  }
+}
+
 int main(int argc, char* argv[]){
   if(argc!=2){
     printf("usage: ./pathfinder <input file name>\n");
@@ -505,6 +658,18 @@ int main(int argc, char* argv[]){
   // setvbuf(stdout, NULL, _IONBF, 0);
 
   signal(SIGCHLD, sig_chld);
+  int msqid;
+  key_t key;
+
+  if((key = ftok(MSGQ_PATH, MS_ID))<0){
+    perror("ftok");
+    exit(1);
+  }
+  if((msqid = msgget(key, IPC_CREAT | 0664))<0){
+    perror("msgget");
+    exit(1);
+  }
+  // printf("\t%d %d\n", getpid(), msqid);
   // read urls from a FILE
   int urlCnt = fill_urls(argv[1]);
   // printf("%d\n", urlCnt);
@@ -518,17 +683,61 @@ int main(int argc, char* argv[]){
     }
   }
   if(urlInd == urlCnt){
-    pid_t pid;
-    int stat;
+    // pid_t pid;
+    // int stat;
 
     // while((pid=waitpid(-1, &stat, WNOHANG))<=0);
+    // printf("\t%d %d\n", getpid(), msqid);
+    sleep(1);
+    // printf("Collecting ICMP messages...");
+    Message msg;
+    int child = 0;
+    // memset(&result, -1, sizeof(result));
+    while(child<urlCnt){
+      if(msgrcv(msqid, &msg, sizeof(msg), 0,0)<=0){
+        continue;
+      }
+      printf(".");
+      fflush(stdout);
+      // printf("msg rcvd %d %d %d %d\n", msg.mtype, msg.ttl, msg.probe, msg.code);
+      // printf("msg rcvd :%ld %d %d %lf %s %d\n", msg.mtype, msg.ttl, msg.probe, msg.rtt, msg.ip, msg.code);
+      if(msg.code==-4){
+        child++;
+        if(child==urlCnt)
+          break;
+      }
+      // else if(msg.code ==-5){
+      //   printf("ignore\n");
+      // }
+      else{
+        result[msg.mtype-1][msg.ttl][msg.probe].rtt = msg.rtt;
+        strcpy(result[msg.mtype-1][msg.ttl][msg.probe].ip, msg.ip);
+        result[msg.mtype-1][msg.ttl][msg.probe].code = msg.code;
+      }
+      bzero(&msg, sizeof(msg));
+    }
+    printf("\n");
+
+    if(msgctl(msqid,IPC_RMID,NULL)<0){
+      perror("msgctl");
+    }
+
     wait(NULL);
-    find_longest_common_path();
+    // fill_results(urlCnt);
+    print_results(urlCnt);
+    find_longest_common_path(urlCnt);
     return 0;
   }
 
   if(url==NULL)
     exit(0);
+
+  // int id = compute_hash(url);
+  // key_t key = ftok(MSGQ_PATH, id);
+  // int msqid = -1;
+  // if((msqid=msgget(key, 0660|IPC_CREAT))<0){
+  //   perror("msgget");
+  // }
 
   struct addrinfo *ai;
   proto* pr;
@@ -541,9 +750,9 @@ int main(int argc, char* argv[]){
     perror("getaddrinfo");
     exit(errno);
   }
-  char* h = sock_ntop_host(ai->ai_addr, ai->ai_addrlen);
-  printf("traceroute to %s(%s): %d hops max, %d data bytes\n",
-  ai->ai_canonname?ai->ai_canonname:h, h, MAX_TTL, datalen);
+  // char* h = sock_ntop_host(ai->ai_addr, ai->ai_addrlen);
+  // printf("traceroute to %s(%s): %d hops max, %d data bytes\n",
+  // ai->ai_canonname?ai->ai_canonname:h, h, MAX_TTL, datalen);
   if(ai->ai_family == AF_INET){
     pr = &proto_v4;
   }
@@ -586,6 +795,7 @@ int main(int argc, char* argv[]){
     params[ttl-1].ai = ai;
     params[ttl-1].pr = pr;
     params[ttl-1].urlInd = urlInd;
+    // params[ttl-1].msqid = msqid;
     pthread_mutex_lock(&compl_lock);
     if(done==1){
       pthread_mutex_unlock(&compl_lock);
@@ -612,15 +822,34 @@ int main(int argc, char* argv[]){
       }
     }
   }
-  printf("%s results...\n", url);
-  for(int ttl=1;ttl<=last_created_thread;ttl++){
-    printf("[%d] ",ttl);
-    for(int probe=1;probe<=NPROBES;probe++){
-      printf("(%s %lf) ", result[urlInd][ttl-1][probe-1].ip, result[urlInd][ttl-1][probe-1].rtt);
-    }
-    printf("*\n");
+  // printf("\t%d %d\n", getpid(), msqid);
+  Message msg;
+  bzero(&msg, sizeof(msg));
+  msg.mtype = urlCnt;
+  msg.code = -4;
+  msg.ttl = 0;
+  msg.probe = 0;
+  msg.rtt = 0.0;
+  strcpy(msg.ip, "-^-");
+  pthread_mutex_lock(&mq_lock);
+  if(msgsnd(msqid, &msg, sizeof(msg), 0)<0){
+    // if(errno==EAGAIN)
+    //   printf("queue full\n");
+    // printf("%d %d %d\n", getpid(), msg.code, msqid);
+    perror("msgsnd");
+    // printf("%ld %d %d %lf %s %d\n", msg.mtype, msg.ttl, msg.probe, msg.rtt, msg.ip, msg.code);
   }
+  pthread_mutex_unlock(&mq_lock);
+  // printf("%s results...\n", url);
+  // for(int ttl=1;ttl<=last_created_thread;ttl++){
+  //   printf("[%d] ",ttl);
+  //   for(int probe=1;probe<=NPROBES;probe++){
+  //     printf("(%s %lf) ", result[urlInd][ttl-1][probe-1].ip, result[urlInd][ttl-1][probe-1].rtt);
+  //   }
+  //   printf("*\n");
+  // }
   // pthread_exit(NULL);
-  printf("%d terminating\n", getpid());
+
+  // printf("%d terminating\n", getpid());
   return 0;
 }
