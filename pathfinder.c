@@ -26,7 +26,7 @@
 #define MAX_DOMAINS 5
 #define BUF_SIZE 1500
 #define NPROBES 3
-#define WAITTIME 1
+#define WAITTIME 2
 
 extern int errno;
 extern int gotalarm;
@@ -95,8 +95,13 @@ typedef struct args{
   // struct timeval tv;
 }args;
 
+typedef struct result{
+  double rtt;
+}result;
+
 int datalen = sizeof(rec); //bytes of data following ICMP header
 char urls[MAX_DOMAINS][50];
+
 // char* host;
 // u_short sport, dport;
 
@@ -108,6 +113,10 @@ u_short dport = 32768+666;
 
 pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t compl_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void find_longest_common_path(){
+
+}
 
 const char * icmpcode_v4(int code)
 {
@@ -220,11 +229,11 @@ int recv_v4(int recvfd, int sport, proto* pr, int seq, struct timeval *tv){
     struct udphdr *udp;
 
     clock_t start = clock();
-
-    while(((clock()-start)/CLOCKS_PER_SEC)<WAITTIME){
-      if(select(recvfd+1, &fds, NULL, NULL, &wait)<=0){
-        continue;
-      }
+    int rdes = 0;
+    while((rdes = select(recvfd+1, &fds, NULL, NULL, &wait))>0){
+      // if(select(recvfd+1, &fds, NULL, NULL, &wait)<=0){
+      //   continue;
+      // }
       len = pr->salen;
       recvsize = recvfrom(recvfd, recvbuf, sizeof(recvbuf),0, pr->sarecv, &len);
       if(recvsize<0){
@@ -232,7 +241,8 @@ int recv_v4(int recvfd, int sport, proto* pr, int seq, struct timeval *tv){
           continue;
         else{
           perror("recvfrom");
-          pthread_exit(0);
+          // pthread_exit(0);
+          break;
         }
       }
       ip = (struct ip*) recvbuf; //start of IP header
@@ -275,8 +285,10 @@ int recv_v4(int recvfd, int sport, proto* pr, int seq, struct timeval *tv){
 
         udp = (struct udphdr*) (recvbuf+hlen1+8+hlen2);
         if(hip->ip_p == IPPROTO_UDP && udp->uh_sport == htons(sport) && udp->uh_dport == htons(dport+seq)){
-          if(icmp->icmp_code == ICMP_UNREACH_PORT)
+          if(icmp->icmp_code == ICMP_UNREACH_PORT){
+            printf("destination reached\n");
             ret = -1; // we have reached destination
+          }
           else
             ret = icmp->icmp_code;
           break;
@@ -285,7 +297,12 @@ int recv_v4(int recvfd, int sport, proto* pr, int seq, struct timeval *tv){
 
     }
     gettimeofday(tv, NULL);
-
+    // if(rdes==-1){
+    //   printf("select error\n");
+    // }
+    // else if(rdes==0){
+    //   printf("no desc left\n");
+    // }
     return ret;
 }
 
@@ -385,9 +402,11 @@ void* func(void* argv){
   pthread_mutex_lock(&compl_lock);
   if(done==1){
     pthread_mutex_unlock(func_args->life_mtx);
+    printf("%s ho gya\n", url);
     pthread_mutex_unlock(&compl_lock);
     return NULL;
   }
+  pthread_mutex_unlock(&compl_lock);
 
   func_args->recvfd = socket(pr->sasend->sa_family, SOCK_RAW, pr->icmpproto);
 
@@ -408,11 +427,13 @@ void* func(void* argv){
 
   setsockopt(func_args->sendfd, pr->ttllevel, pr->ttloptname, &ttl, sizeof(int));
   bzero(pr->salast, pr->salen);
-  printf("[%d] ", ttl);
-
+  // printf("ttl [%d] ", ttl);
+  // fflush(stdout);
   int code = 0;
 
   for(int probe = 0; probe<NPROBES;probe++){
+    // printf("%s probe [%d] ",url, probe);
+    // fflush(stdout);
     recvdata = (struct rec*) sendbuf;
     pthread_mutex_lock(&seq_lock);
     recvdata->rec_seq = seq;
@@ -424,7 +445,7 @@ void* func(void* argv){
     ssize_t datasent = 0;
     if((datasent = sendto(func_args->sendfd, sendbuf, datalen, 0, pr->sasend, pr->salen))<0){
       perror("sendto");
-      pthread_exit(0);
+      break;
     }
     if((code = (*pr->recv)(func_args->recvfd, sport, pr, seq, &tvrecv))==-3){
       printf(" *"); // timeout
@@ -447,6 +468,7 @@ void* func(void* argv){
 
       if(code == -1){
         pthread_mutex_lock(&compl_lock);
+        printf("%s ho gya\n", url);
         done = 1;
         pthread_mutex_unlock(&compl_lock);
       }
@@ -455,8 +477,9 @@ void* func(void* argv){
       }
 
     }
-    fflush(stdout);
+    // printf("\n");
   }
+  printf("\n");
   pthread_mutex_unlock(func_args->life_mtx);
   return (NULL);
 }
@@ -464,7 +487,7 @@ void* func(void* argv){
 void sig_chld(int signo){
   pid_t pid;
   int stat;
-  while((pid=waitpid(-1, &stat, WNOHANG))<0)
+  while((pid=waitpid(-1, &stat, WNOHANG))>0)
     printf("child %d terminated\n", pid);
   return;
 }
@@ -491,6 +514,7 @@ int main(int argc, char* argv[]){
     pid_t pid;
     int stat;
     while((pid=waitpid(-1, &stat, WNOHANG))<=0);
+    find_longest_common_path();
     return 0;
   }
   if(url==NULL)
@@ -507,7 +531,9 @@ int main(int argc, char* argv[]){
     perror("getaddrinfo");
     exit(errno);
   }
-  // char* h = sock_ntop_host(ai->ai_addr, ai->ai_addrlen);
+  char* h = sock_ntop_host(ai->ai_addr, ai->ai_addrlen);
+  printf("traceroute to %s(%s): %d hops max, %d data bytes\n",
+  ai->ai_canonname?ai->ai_canonname:h, h, MAX_TTL, datalen);
   if(ai->ai_family == AF_INET){
     pr = &proto_v4;
   }
@@ -555,12 +581,12 @@ int main(int argc, char* argv[]){
   }
   // join threads
   int flag = 0;
-  while(flag<MAX_TTL){
-    printf("%d %d\n", getpid(), flag);
+  while(flag<last_created_thread){
+    // printf("%d %d\n", getpid(), flag);
     for(int ttl=1;ttl<=last_created_thread;ttl++){
       if(!completed[ttl-1] && pthread_mutex_trylock(&life_mtx[ttl-1])==0){
         flag++;
-        printf("%s %d completed\n", url, ttl);
+        // printf("%s %d completed\n", url, ttl);
         completed[ttl-1] = 1;
         pthread_join(thread_id[ttl-1],NULL);
       }
