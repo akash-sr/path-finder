@@ -20,9 +20,9 @@ In linux, the command to use traceroute for _google.com_  would be:
 
 CRITERIA | DEFAULT TRACEROUTE | Pathfinder 
 -------|-------| ------------
-SPEED | Takes ~ 20 seconds per URL | Takes < 5 seconds 
+SPEED | Takes ~ 30 seconds per URL | Takes < 5 seconds 
 MULTIPLE COMMANDS | To be given one-by-one | Can take multiple in one go from a file
-MULTIPROCESS | Total time = (no. of URLs) X 20 seconds | Total time < 5 seconds irrespective of no. of URLs 
+MULTIPROCESS | Total time = (no. of URLs) X 30 seconds | Total time < 5 seconds irrespective of no. of URLs 
 CORRELATION | No functionality here | Finds the longest common path between the URLs specified 
 
 ----
