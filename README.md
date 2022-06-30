@@ -1,8 +1,4 @@
 # Ultra-Fast Traceroute (UFT)
-_Creators:_   
-_Yuvraj Singh Malhi (BITS Pilani Electronics)_   
-_Shivam Goyal       (BITS Pilani Computers)_   
-
 ## Description
 Traceroute is a very famous networking tools to determine the path from a machine to another machine. 
 
