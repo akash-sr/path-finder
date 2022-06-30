@@ -45,7 +45,7 @@ CORRELATION | No functionality here | Finds the longest common path between the 
 Voila! Expand the second terminal to see the results of individual traceroute and also the longest common path.
 
 <p align = "center">
-	<img src = "assets/demo.gif">
+	<img src = "assets/demoo.gif">
 </p>
 
 
