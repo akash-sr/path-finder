@@ -161,7 +161,7 @@ int main(int argc, char *argv[]){
 	
 	
 	printf("\n----------------------- CLIENT CONNECT ------------------------\n\n");
-	printf("SERVER: Connecting to   findLongestCommonPath.c   .... \n");
+	printf("SERVER: Connecting to   pathfinder.c   .... \n");
 
 	C_FD = accept(L_FD, NULL, NULL);
 

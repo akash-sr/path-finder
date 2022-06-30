@@ -119,7 +119,10 @@ void calcLCP(struct Result* res, int n){
 						strcpy(paths[i][ind], res[i].result[it]);
 						lastip = paths[i][ind];
 						ind++;
+						
+						break;
 					}
+					it++;
 				}
 					// printf("\t%16s",R.result[i++]);
 			}
@@ -131,6 +134,7 @@ void calcLCP(struct Result* res, int n){
 		plen[i] = ind;
 		len = len>ind?len:ind;
 	}
+	
 	int taken[len];
   int indexes[n];
   memset(&taken, 1, sizeof(taken));
@@ -193,7 +197,7 @@ void main()
 	conn.sin_family = AF_INET;
 	conn.sin_addr.s_addr  =  htonl(INADDR_ANY);
 
-	printf("CONNECT: Connecting with fastertraceroute.c ....\n");
+	printf("CONNECT: Connecting with trace_route.c ....\n");
 
 	if (connect(FD, (struct sockaddr *)&conn, sizeof(conn)) < 0)
 	{
